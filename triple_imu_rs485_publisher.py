@@ -11,14 +11,16 @@
    - 设备3 (0x52): 机械爪 (IMU3)
 2. 计算两杆串联机械臂的末端位置（IMU1 + IMU2）
 3. 读取机械爪的姿态（IMU3）
-4. 通过ZeroMQ PUB socket发布数据到MuJoCo仿真接收端
-5. 发布频率默认5Hz，采用latest-only策略
+4. 键盘控制夹爪开合（按键1打开，按键2闭合）
+5. 通过ZeroMQ PUB socket发布数据到MuJoCo仿真接收端
+6. 发布频率默认5Hz，采用latest-only策略
 
 数据流架构：
     IMU1 (0x50/RS485) ──┐
                          ├──> 运动学计算 ──> 末端位置
     IMU2 (0x51/RS485) ──┘                        ↓
     IMU3 (0x52/RS485) ──────> 机械爪姿态  ────────┴──> ZeroMQ发布 ──> MuJoCo仿真
+    键盘按键1/2 ──────────> 夹爪控制 ────────────┘
 
 运行方法：
     # 使用默认参数（5Hz发布到localhost:5555）
@@ -29,6 +31,11 @@
     
     # 自定义发布频率和串口
     python triple_imu_rs485_publisher.py --port /dev/ttyUSB0 --interval 0.1 --online-only
+
+键盘控制：
+    按键 '1' - 夹爪慢慢打开 (gripper值增加0.01，范围0.0-1.0)
+    按键 '2' - 夹爪慢慢闭合 (gripper值减少0.01，范围0.0-1.0)
+    按键 'q' - 退出程序
 """
 import time
 import json
@@ -38,6 +45,10 @@ import zmq
 import threading
 from collections import deque
 from scipy.spatial.transform import Rotation
+import sys
+import select
+import termios
+import tty
 
 import device_model
 
@@ -106,6 +117,112 @@ imu3_first_data = None
 # 轨迹记录
 trajectory_positions = deque(maxlen=1000)
 trajectory_timestamps = deque(maxlen=1000)
+
+# === 夹爪控制参数 ===
+gripper_value = 0.0  # 夹爪开合值 (0.0 = 完全闭合, 1.0 = 完全打开)
+gripper_lock = threading.Lock()
+GRIPPER_STEP = 0.005  # 每次调整的步长（减小以提高平滑度）
+GRIPPER_UPDATE_RATE = 0.02  # 更新频率（秒），50Hz更新
+
+# === 键盘监听状态 ===
+keyboard_thread_running = False
+original_terminal_settings = None
+current_key = None  # 当前按下的键
+last_key_time = 0.0  # 最后一次按键时间
+KEY_TIMEOUT = 0.1  # 按键超时时间（秒）- 超过此时间视为松开
+
+
+def keyboard_listener():
+    """
+    键盘输入检测线程 - 持续读取按键
+    """
+    global current_key, last_key_time, keyboard_thread_running, original_terminal_settings
+    
+    # 保存原始终端设置
+    try:
+        original_terminal_settings = termios.tcgetattr(sys.stdin)
+        # 设置终端为非缓冲模式
+        tty.setcbreak(sys.stdin.fileno())
+    except:
+        print("⚠️  无法设置终端模式，键盘控制可能不可用")
+        return
+    
+    print("\n" + "="*70)
+    print("键盘控制已启用（实时响应模式）:")
+    print("  按住 '1' - 夹爪持续打开")
+    print("  按住 '2' - 夹爪持续闭合")
+    print("  松开按键 - 立刻停止（100ms内无重复按键）")
+    print("  按 'q' - 退出程序")
+    print("="*70 + "\n")
+    
+    try:
+        while keyboard_thread_running:
+            # 非阻塞检查是否有按键输入
+            if select.select([sys.stdin], [], [], 0.001)[0]:  # 1ms超时
+                key = sys.stdin.read(1)
+                
+                if key in ['1', '2']:
+                    current_key = key
+                    last_key_time = time.time()
+                elif key == 'q' or key == 'Q':
+                    print("\n⚠️  检测到退出键 'q'，程序即将退出...")
+                    keyboard_thread_running = False
+                    break
+            
+            time.sleep(0.001)  # 1ms循环
+    
+    finally:
+        # 恢复终端设置
+        if original_terminal_settings:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
+            except:
+                pass
+
+
+def gripper_update_thread():
+    """
+    夹爪更新线程 - 根据按键状态持续更新夹爪值
+    """
+    global gripper_value, current_key, last_key_time, keyboard_thread_running
+    
+    last_print_value = 0.0
+    
+    while keyboard_thread_running:
+        current_time = time.time()
+        
+        # 检查按键是否超时（视为松开）
+        if current_time - last_key_time > KEY_TIMEOUT:
+            current_key = None
+        
+        # 根据当前按键更新夹爪值
+        with gripper_lock:
+            old_value = gripper_value
+            
+            if current_key == '1':
+                # 夹爪打开
+                gripper_value = min(1.0, gripper_value + GRIPPER_STEP)
+            elif current_key == '2':
+                # 夹爪闭合
+                gripper_value = max(0.0, gripper_value - GRIPPER_STEP)
+            
+            # 只在值有明显变化时打印（减少输出噪音）
+            if abs(gripper_value - last_print_value) > 0.01:
+                if current_key == '1':
+                    print(f"\r🔧 夹爪 ↑ 打开: {gripper_value:.3f} ({gripper_value*100:.1f}%)   ", end='', flush=True)
+                    last_print_value = gripper_value
+                elif current_key == '2':
+                    print(f"\r🔧 夹爪 ↓ 闭合: {gripper_value:.3f} ({gripper_value*100:.1f}%)   ", end='', flush=True)
+                    last_print_value = gripper_value
+            
+            # 检测到松开（从有按键变为无按键）
+            if current_key is None and old_value != gripper_value:
+                # 已经停止变化了，不需要额外打印
+                pass
+        
+        time.sleep(GRIPPER_UPDATE_RATE)
+    
+    print()  # 换行
 
 
 def normalize_angle(angle):
@@ -397,6 +514,10 @@ def publisher_loop(pub_socket, publish_interval, online_only=False):
             y_mapped = Y_TARGET_MIN + (y_raw - Y_RAW_MIN) / (Y_RAW_MAX - Y_RAW_MIN) * (Y_TARGET_MAX - Y_TARGET_MIN)
             z_mapped = Z_TARGET_MIN + (z_raw - Z_RAW_MIN) / (Z_RAW_MAX - Z_RAW_MIN) * (Z_TARGET_MAX - Z_TARGET_MIN)
             
+            # 读取夹爪值（带线程锁）
+            with gripper_lock:
+                current_gripper = gripper_value
+            
             # === 步骤4: 构造发布消息 ===
             message = {
                 "position": [
@@ -412,7 +533,7 @@ def publisher_loop(pub_socket, publish_interval, online_only=False):
                     float(np.deg2rad(euler3["pitch"])),  # Pitch（度→弧度）
                     float(np.deg2rad(euler3["yaw"]))     # Yaw（度→弧度）
                 ],
-                "gripper": 0.0,  # 夹爪状态（未实现，暂时设为0）
+                "gripper": float(current_gripper),  # 夹爪状态 (0.0-1.0，键盘控制)
                 "t": current_time  # 时间戳
             }
             
@@ -465,6 +586,12 @@ def publisher_loop(pub_socket, publish_interval, online_only=False):
                 sent_pitch = float(np.deg2rad(euler3["pitch"]))
                 sent_yaw = float(np.deg2rad(euler3["yaw"]))
                 print(f"│ 发送姿态: Roll={sent_roll:7.4f} rad, Pitch={sent_pitch:7.4f} rad, Yaw={sent_yaw:7.4f} rad".ljust(84) + "│")
+                
+                # 显示夹爪状态
+                gripper_percent = current_gripper * 100
+                gripper_bar = "█" * int(current_gripper * 20) + "░" * (20 - int(current_gripper * 20))
+                print(f"│ 夹爪开合: [{gripper_bar}] {gripper_percent:5.1f}% ({current_gripper:.2f})".ljust(85) + "│")
+                
                 print(f"│ 发布频率: {actual_rate:.1f} Hz  │  消息数: {publish_count}".ljust(69) + "│")
                 print("└" + "─"*68 + "┘\n")
                 
@@ -734,8 +861,22 @@ MuJoCo接收端：
             time.sleep(0.1)
         print("✓ 所有IMU已完成Yaw归零\n")
         
+        # 启动键盘监听线程和夹爪更新线程
+        global keyboard_thread_running
+        keyboard_thread_running = True
+        
+        # 键盘输入检测线程
+        keyboard_thread = threading.Thread(target=keyboard_listener, daemon=True, name="KeyboardListener")
+        keyboard_thread.start()
+        
+        # 夹爪更新线程
+        gripper_thread = threading.Thread(target=gripper_update_thread, daemon=True, name="GripperUpdater")
+        gripper_thread.start()
+        
+        print("✓ 键盘控制已启动（双线程模式：按键检测 + 夹爪更新）\n")
+        
         # 启动ZeroMQ发布循环
-        print("✓ 所有任务已启动，按Ctrl+C停止\n")
+        print("✓ 所有任务已启动，按Ctrl+C或'q'键停止\n")
         publisher_loop(pub_socket, args.interval, args.online_only)
         
     except KeyboardInterrupt:
@@ -746,6 +887,17 @@ MuJoCo接收端：
         traceback.print_exc()
     finally:
         print("\n正在清理资源...")
+        
+        # 停止键盘监听线程
+        keyboard_thread_running = False
+        
+        # 恢复终端设置
+        if original_terminal_settings:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, original_terminal_settings)
+                print("✓ 终端设置已恢复")
+            except:
+                pass
         
         # 停止RS485设备
         if rs485_device and rs485_device.isOpen:
