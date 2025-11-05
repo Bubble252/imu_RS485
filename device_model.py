@@ -11,7 +11,7 @@ class SerialConfig:
     portName = ''
 
     # 波特率
-    baud = 9600
+    baud = 115200  # ⬅️ 这里是默认值
 
 
 # 设备实例 Device instance
@@ -176,7 +176,7 @@ class DeviceModel:
                     if self.isOpen:  # 只在设备应该打开时打印错误
                         pass  # 忽略关闭时的错误
             else:
-                time.sleep(0.1)
+                time.sleep(0.01)
                 print("串口未打开")
                 break
 
@@ -379,7 +379,7 @@ class DeviceModel:
             try:
                 for addr in self.addrLis:
                     self.readReg(addr, 0x34, 12)
-                    time.sleep(0.2)
+                    time.sleep(0.03)
             except Exception as ex:
                 print(f"循环读取错误: {ex}")
                 break
