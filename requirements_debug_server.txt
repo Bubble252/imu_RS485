@@ -1,0 +1,19 @@
+# IMU Debug Server 后端依赖包
+# 安装命令: pip install -r requirements_debug_server.txt
+
+# FastAPI核心
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# WebSocket支持
+websockets==12.0
+
+# ZeroMQ异步支持
+pyzmq==25.1.2
+
+# 数据处理
+# 使用>=2.0以兼容系统中的opencv和其他依赖
+numpy>=2.0,<2.3
+
+# 可选：日志美化
+rich==13.7.0

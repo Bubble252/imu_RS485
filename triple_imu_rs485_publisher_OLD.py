@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # coding:UTF-8
 """
-三IMU欧拉角读取 + ZeroMQ发布程序 (RS485版本 - 双PUSH架构)
-基于RS485串口连接三个WIT IMU传感器，实时读取欧拉角并发布到B端和本地LeRobot
+三IMU欧拉角读取 + ZeroMQ发布程序 (RS485版本)
+基于RS485串口连接三个WIT IMU传感器，实时读取欧拉角并发布到MuJoCo仿真环境
 
 功能说明：
 1. 通过RS485连接三个IMU传感器，实时读取欧拉角
@@ -12,51 +12,25 @@
 2. 计算两杆串联机械臂的末端位置（IMU1 + IMU2）
 3. 读取机械爪的姿态（IMU3）
 4. 键盘控制夹爪开合（按键1打开，按键2闭合）
-5. 通过ZeroMQ双PUSH socket发布数据（参考A_real_video.py）
-   - PUSH → B端:5555 (转发到C端和保存LeRobot数据集)
-   - PUSH → 本地LeRobot:5559 (MuJoCo实时仿真)
-6. 通过ZeroMQ SUB socket接收B端视频流（可选）
-7. 发布频率默认5Hz
+5. 通过ZeroMQ PUB socket发布数据到MuJoCo仿真接收端
+6. 发布频率默认5Hz，采用latest-only策略
 
-数据流架构（参考A_real_video.py + B_reverse_whole.py）：
+数据流架构：
     IMU1 (0x50/RS485) ──┐
                          ├──> 运动学计算 ──> 末端位置
     IMU2 (0x51/RS485) ──┘                        ↓
-    IMU3 (0x52/RS485) ──────> 机械爪姿态  ────────┴──> 数据打包
-    键盘按键1/2 ──────────> 夹爪控制 ────────────┘          ↓
-                                                    ┌──────┴──────┐
-                                                    │             │
-                                         PUSH → B端:5555    PUSH → 本地:5559
-                                                ↓                  ↓
-                                           转发到C端         MuJoCo仿真
-                                         LeRobot保存      (lerobot_zeroMQ_imu.py)
-    
-    视频流: B端:5557 (PUB) ──SUB──> 本地显示（可选）
-
-ZeroMQ通信模式（与B_reverse_whole.py兼容）：
-    发送端（A端，本文件）:
-      - socket_to_b (PUSH): connect到B的5555端口
-      - socket_to_lerobot (PUSH): connect到本地5559端口
-      - video_receiver (SUB): connect到B的5557端口（可选）
-    
-    接收端（B端，B_reverse_whole.py）:
-      - 5555端口 (PULL): bind，接收A的传感器数据
-      - 5557端口 (PUB): bind，发送视频给A
-      - 5556端口 (PUSH): connect到C
-      - 5558端口 (PULL): bind，接收C的数据
-    
-    接收端（本地LeRobot，lerobot_zeroMQ_imu.py）:
-      - 5559端口 (PULL): bind，接收A的传感器数据
+    IMU3 (0x52/RS485) ──────> 机械爪姿态  ────────┴──> ZeroMQ发布 ──> MuJoCo仿真
+    键盘按键1/2 ──────────> 夹爪控制 ────────────┘
 
 运行方法：
-    # 使用默认参数（发送到B端5555和本地5559）
+    # 使用默认参数（5Hz发布到localhost:5555）
+    python triple_imu_rs485_publisher.py
+    
+    # 仅在三个IMU都在线时发布（推荐）
     python triple_imu_rs485_publisher.py --online-only
     
-    # 完整示例（远程B端 + 本地LeRobot + 视频）
-    python triple_imu_rs485_publisher.py --online-only \\
-           --b-host 192.168.1.100 --b-port 5555 \\
-           --lerobot-host localhost --lerobot-port 5559 \\
-           --enable-video --video-host 192.168.1.100 --video-port 5557
+    # 自定义发布频率和串口
+    python triple_imu_rs485_publisher.py --port /dev/ttyUSB0 --interval 0.1 --online-only
 
 键盘控制：
     按键 '1' - 夹爪慢慢打开 (gripper值增加0.01，范围0.0-1.0)
@@ -75,8 +49,6 @@ import sys
 import select
 import termios
 import tty
-import pickle
-import cv2
 
 import device_model
 
@@ -89,24 +61,9 @@ IMU1_ADDR = 0x50  # 80 - 杆1
 IMU2_ADDR = 0x51  # 81 - 杆2
 IMU3_ADDR = 0x52  # 82 - 机械爪
 
-# === ZeroMQ默认配置（参考A_real_video.py双线程架构）===
-# 发送传感器数据到B端（PUSH模式，匹配B_reverse_whole.py的PULL socket）
-DEFAULT_B_HOST = "localhost"
-DEFAULT_B_PORT_COMMAND = 5555  # 发送传感器数据到B端（对应B的SERVER_B_PORT_FOR_A_COMMAND）
-
-# 发送传感器数据到本地LeRobot（PUSH模式）
-DEFAULT_LEROBOT_HOST = "localhost"
-DEFAULT_LEROBOT_PORT = 5559  # 本地LeRobot接收端口（独立端口避免冲突）
-
-# 发送调试数据到Web UI后端（PUB模式）
-DEFAULT_DEBUG_PORT = 5560  # 调试数据发布端口（给debug_server.py订阅）
-
-# 接收B端视频流（SUB模式，对应B的SERVER_B_PORT_FOR_A_VIDEO）
-DEFAULT_VIDEO_HOST = "localhost"
-DEFAULT_VIDEO_PORT = 5557  # 从B端接收视频流
-
+# === ZeroMQ默认配置 ===
+DEFAULT_BIND_ADDRESS = "tcp://127.0.0.1:5555"
 DEFAULT_PUBLISH_INTERVAL = 0.2  # 5Hz
-ENABLE_VIDEO_DISPLAY = False  # 是否显示视频窗口（默认关闭，避免阻塞）
 
 # === Yaw归零模式 ===
 YAW_NORMALIZATION_MODE = "NORMAL"  # "NORMAL": 首次数据归零, "AUTO": 智能偏置, "SIMPLE": ±180翻转, "OFF": 不归零
@@ -173,11 +130,6 @@ original_terminal_settings = None
 current_key = None  # 当前按下的键
 last_key_time = 0.0  # 最后一次按键时间
 KEY_TIMEOUT = 0.1  # 按键超时时间（秒）- 超过此时间视为松开
-
-# === 视频接收状态 ===
-video_thread_running = False
-video_frame_count = 0
-video_last_latency = 0.0
 
 
 def keyboard_listener():
@@ -271,259 +223,6 @@ def gripper_update_thread():
         time.sleep(GRIPPER_UPDATE_RATE)
     
     print()  # 换行
-
-
-def video_receiver_thread(video_host="localhost", video_port=5557):
-    """
-    视频接收线程 - 从B端接收视频流（参考A_real_video.py）
-    """
-    global video_thread_running, video_frame_count, video_last_latency
-    
-    print(f"\n📹 启动视频接收线程: {video_host}:{video_port}")
-    
-    try:
-        # 创建独立的ZMQ上下文（避免与发布端冲突）
-        video_context = zmq.Context()
-        video_socket = video_context.socket(zmq.SUB)
-        video_socket.setsockopt(zmq.RCVHWM, 1)  # 接收缓冲区只保留1帧
-        video_socket.setsockopt(zmq.CONFLATE, 1)  # 只保留最新消息，丢弃旧帧
-        video_socket.connect(f"tcp://{video_host}:{video_port}")
-        video_socket.setsockopt_string(zmq.SUBSCRIBE, "")  # 订阅所有消息
-        
-        print(f"✓ 视频接收已连接到 {video_host}:{video_port}")
-        
-        # 创建窗口（如果启用显示）
-        if ENABLE_VIDEO_DISPLAY:
-            try:
-                cv2.namedWindow('Remote Video from B', cv2.WINDOW_NORMAL)
-                cv2.resizeWindow('Remote Video from B', 640, 480)
-                print("✓ OpenCV视频窗口已创建")
-            except Exception as e:
-                print(f"⚠️  OpenCV窗口创建失败（可能无显示环境）: {e}")
-        
-        while video_thread_running:
-            try:
-                # 非阻塞接收（1秒超时）
-                if video_socket.poll(1000):
-                    recv_time = time.time()
-                    video_data = video_socket.recv()
-                    
-                    # 尝试反序列化（支持pickle和JSON）
-                    try:
-                        # 优先尝试pickle（A_real_video.py使用pickle）
-                        frame_dict = pickle.loads(video_data)
-                    except:
-                        try:
-                            # 回退到JSON
-                            frame_dict = json.loads(video_data.decode('utf-8'))
-                        except:
-                            print("⚠️  视频数据反序列化失败")
-                            continue
-                    
-                    video_frame_count += 1
-                    
-                    # 计算延迟
-                    if 'timestamp' in frame_dict:
-                        video_last_latency = (recv_time - frame_dict['timestamp']) * 1000  # ms
-                    
-                    # 解码视频帧
-                    if ENABLE_VIDEO_DISPLAY and 'image' in frame_dict:
-                        try:
-                            if frame_dict.get('encoding') == 'jpeg':
-                                encoded_data = frame_dict['image']
-                                if isinstance(encoded_data, bytes):
-                                    nparr = np.frombuffer(encoded_data, np.uint8)
-                                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                    
-                                    if frame is not None:
-                                        # 叠加信息
-                                        cv2.putText(frame, f"Frames: {video_frame_count}", 
-                                                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                                                   0.6, (0, 255, 255), 2)
-                                        if video_last_latency > 0:
-                                            cv2.putText(frame, f"Latency: {video_last_latency:.1f}ms", 
-                                                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
-                                                       0.6, (0, 255, 0), 2)
-                                        
-                                        cv2.imshow('Remote Video from B', frame)
-                                        # 按 'q' 退出
-                                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                                            print("\n⚠️  视频窗口按下'q'，退出...")
-                                            video_thread_running = False
-                                            break
-                        except Exception as e:
-                            if video_frame_count % 30 == 0:
-                                print(f"⚠️  视频解码失败: {e}")
-                    
-                    # 每30帧打印一次日志
-                    if video_frame_count % 30 == 0:
-                        latency_str = f"{video_last_latency:.1f}ms" if video_last_latency > 0 else "N/A"
-                        print(f"📹 [视频] 接收帧 #{video_frame_count}, 延迟: {latency_str}")
-            
-            except zmq.Again:
-                # 超时，继续循环
-                time.sleep(0.01)
-            except Exception as e:
-                print(f"⚠️  视频接收错误: {e}")
-                time.sleep(0.1)
-        
-    except Exception as e:
-        print(f"❌ 视频接收线程异常: {e}")
-    finally:
-        if ENABLE_VIDEO_DISPLAY:
-            try:
-                cv2.destroyAllWindows()
-            except:
-                pass
-        try:
-            video_socket.close()
-            video_context.term()
-        except:
-            pass
-        print("✓ 视频接收线程已退出")
-
-
-def debug_publisher_thread(debug_port=5560):
-    """
-    调试数据发布线程 - 发送实时数据给Web UI后端（独立运行，不影响主逻辑）
-    
-    发布格式：JSON over ZeroMQ PUB
-    端口：5560（默认）
-    频率：20Hz（避免UI过载）
-    
-    数据结构：
-    {
-        "timestamp": 当前时间戳,
-        "imu1/2/3": {"roll": ..., "pitch": ..., "yaw": ...},
-        "position": {"raw": [x,y,z], "mapped": [x,y,z]},
-        "gripper": 0.0-1.0,
-        "online_status": {"imu1": true/false, ...},
-        "stats": {"publish_rate": ..., "message_count": ...}
-    }
-    """
-    global imu1_euler, imu2_euler, imu3_euler, gripper_value
-    global imu1_last_update, imu2_last_update, imu3_last_update
-    
-    print(f"\n🔧 启动调试数据发布线程: tcp://*:{debug_port}")
-    
-    try:
-        # 创建独立的ZMQ上下文（避免与主线程冲突）
-        debug_context = zmq.Context()
-        debug_socket = debug_context.socket(zmq.PUB)
-        debug_socket.bind(f"tcp://*:{debug_port}")
-        
-        print(f"✓ 调试数据PUB socket已绑定到端口 {debug_port}")
-        
-        # 等待订阅者连接（ZeroMQ PUB需要短暂延迟）
-        time.sleep(0.5)
-        
-        publish_count = 0
-        last_position_raw = [0.0, 0.0, 0.0]
-        last_position_mapped = [0.0, 0.0, 0.0]
-        last_publish_rate = 0.0
-        
-        while True:
-            try:
-                current_time = time.time()
-                
-                # === 读取最新IMU数据 ===
-                with imu_data_lock:
-                    euler1 = imu1_euler.copy()
-                    euler2 = imu2_euler.copy()
-                    euler3 = imu3_euler.copy()
-                    
-                    # 在线状态检查
-                    imu1_online = (current_time - imu1_last_update) < 1.0 if imu1_last_update > 0 else False
-                    imu2_online = (current_time - imu2_last_update) < 1.0 if imu2_last_update > 0 else False
-                    imu3_online = (current_time - imu3_last_update) < 1.0 if imu3_last_update > 0 else False
-                
-                # === 计算末端位置 ===
-                try:
-                    end_pos, link1_pos, link2_pos = calculate_end_effector_position(euler1, euler2)
-                    
-                    # 坐标映射
-                    x_raw = float(np.clip(end_pos[0], X_RAW_MIN, X_RAW_MAX))
-                    y_raw = float(np.clip(end_pos[1], Y_RAW_MIN, Y_RAW_MAX))
-                    z_raw = float(np.clip(end_pos[2], Z_RAW_MIN, Z_RAW_MAX))
-                    
-                    x_mapped = float(X_TARGET_MIN + (x_raw - X_RAW_MIN) / (X_RAW_MAX - X_RAW_MIN) * (X_TARGET_MAX - X_TARGET_MIN))
-                    y_mapped = float(Y_TARGET_MIN + (y_raw - Y_RAW_MIN) / (Y_RAW_MAX - Y_RAW_MIN) * (Y_TARGET_MAX - Y_TARGET_MIN))
-                    z_mapped = float(Z_TARGET_MIN + (z_raw - Z_RAW_MIN) / (Z_RAW_MAX - Z_RAW_MIN) * (Z_TARGET_MAX - Z_TARGET_MIN))
-                    
-                    last_position_raw = [x_raw, y_raw, z_raw]
-                    last_position_mapped = [x_mapped, y_mapped, z_mapped]
-                except Exception as e:
-                    # 计算失败时使用上次的值
-                    pass
-                
-                # === 读取夹爪值 ===
-                with gripper_lock:
-                    current_gripper = float(gripper_value)
-                
-                # === 构造调试数据包 ===
-                debug_data = {
-                    "timestamp": current_time,
-                    "imu1": {
-                        "roll": float(euler1["roll"]),
-                        "pitch": float(euler1["pitch"]),
-                        "yaw": float(euler1["yaw"])
-                    },
-                    "imu2": {
-                        "roll": float(euler2["roll"]),
-                        "pitch": float(euler2["pitch"]),
-                        "yaw": float(euler2["yaw"])
-                    },
-                    "imu3": {
-                        "roll": float(euler3["roll"]),
-                        "pitch": float(euler3["pitch"]),
-                        "yaw": float(euler3["yaw"])
-                    },
-                    "position": {
-                        "raw": last_position_raw,
-                        "mapped": last_position_mapped
-                    },
-                    "gripper": current_gripper,
-                    "online_status": {
-                        "imu1": imu1_online,
-                        "imu2": imu2_online,
-                        "imu3": imu3_online
-                    },
-                    "stats": {
-                        "publish_count": publish_count,
-                        "publish_rate": last_publish_rate
-                    },
-                    "config": {
-                        "L1": L1,
-                        "L2": L2,
-                        "yaw_mode": YAW_NORMALIZATION_MODE
-                    }
-                }
-                
-                # === 发送JSON数据 ===
-                debug_socket.send_json(debug_data)
-                publish_count += 1
-                
-                # 每50次打印一次日志（避免刷屏）
-                if publish_count % 50 == 0:
-                    last_publish_rate = 50 / 2.5  # 20Hz
-                    # print(f"🔧 [调试] 已发送 {publish_count} 条数据, IMU在线: {imu1_online}/{imu2_online}/{imu3_online}")
-                
-                # 20Hz发布频率
-                time.sleep(0.05)
-                
-            except Exception as e:
-                print(f"⚠️  调试数据发送失败: {e}")
-                time.sleep(0.1)
-    
-    except Exception as e:
-        print(f"❌ 调试数据发布线程异常: {e}")
-    finally:
-        try:
-            debug_socket.close()
-            debug_context.term()
-        except:
-            pass
-        print("✓ 调试数据发布线程已退出")
 
 
 def normalize_angle(angle):
@@ -745,24 +444,22 @@ def data_callback(DeviceModel):
                 imu3_last_update = current_time
 
 
-def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only=False):
+def publisher_loop(pub_socket, publish_interval, online_only=False):
     """
-    ZeroMQ发布循环（双PUSH模式：发送给B端和本地LeRobot）
+    ZeroMQ发布循环
     
     参数：
-        socket_to_b: 发送到B端的PUSH socket
-        socket_to_lerobot: 发送到本地LeRobot的PUSH socket
+        pub_socket: ZeroMQ PUB socket
         publish_interval: 发布间隔（秒）
         online_only: 是否仅在三个IMU都在线时发布
     """
     print("\n" + "="*70)
-    print("ZeroMQ发布器已启动（三IMU RS485模式 - 双PUSH架构）")
+    print("ZeroMQ发布器已启动（三IMU RS485模式）")
     print("="*70)
-    print(f"发送到B端: {socket_to_b.getsockopt_string(zmq.LAST_ENDPOINT)}")
-    print(f"发送到LeRobot: {socket_to_lerobot.getsockopt_string(zmq.LAST_ENDPOINT)}")
+    print(f"发布地址: {pub_socket.getsockopt_string(zmq.LAST_ENDPOINT)}")
     print(f"发布频率: {1.0/publish_interval:.1f} Hz (间隔 {publish_interval*1000:.0f} ms)")
     print(f"在线检查: {'启用（仅在三个IMU都在线时发布）' if online_only else '禁用（始终发布）'}")
-    print(f"发送模式: PUSH (点对点队列)")
+    print(f"缓冲策略: Latest-only（无缓冲队列）")
     print("="*70 + "\n")
     
     publish_count = 0
@@ -822,53 +519,27 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
                 current_gripper = gripper_value
             
             # === 步骤4: 构造发布消息 ===
-            # 为B端准备的消息（使用pickle序列化，匹配B_reverse_whole.py）
-            message_for_b = {
-                "type": "control",  # 标识为控制命令
-                "timestamp": current_time,
-                "euler_angles": {
-                    "roll": float(np.rad2deg(np.deg2rad(euler3["roll"]))),   # 机械爪姿态（度）
-                    "pitch": float(np.rad2deg(np.deg2rad(euler3["pitch"]))),
-                    "yaw": float(np.rad2deg(np.deg2rad(euler3["yaw"])))
-                },
+            message = {
                 "position": [
-                    float(x_mapped),  # x (米)
-                    float(y_mapped),  # y (米)
-                    float(z_mapped)   # z (米)
+                    float(x_mapped),  # x (米) - 映射后的值
+                    float(y_mapped),  # y (米) - 映射后的值
+                    float(z_mapped)   # z (米) - 映射后的值
+                    # 0.0,  # x (米) - 暂时设为0
+                    # 0.0,  # y (米) - 暂时设为0
+                    # 0.0   # z (米) - 暂时设为0
                 ],
                 "orientation": [
-                    float(np.deg2rad(euler3["roll"])),   # Roll（弧度）
-                    float(np.deg2rad(euler3["pitch"])),  # Pitch（弧度）
-                    float(np.deg2rad(euler3["yaw"]))     # Yaw（弧度）
+                    float(np.deg2rad(euler3["roll"])),   # Roll（度→弧度）- IMU3机械爪欧拉角
+                    float(np.deg2rad(euler3["pitch"])),  # Pitch（度→弧度）
+                    float(np.deg2rad(euler3["yaw"]))     # Yaw（度→弧度）
                 ],
-                "gripper": float(current_gripper),  # 夹爪状态 (0.0-1.0)
-                "throttle": 0.5  # 油门值（暂时固定）
+                "gripper": float(current_gripper),  # 夹爪状态 (0.0-1.0，键盘控制)
+                "t": current_time  # 时间戳
             }
             
-            # 为本地LeRobot准备的消息（JSON格式，保持原有格式）
-            message_for_lerobot = {
-                "position": [
-                    float(x_mapped),
-                    float(y_mapped),
-                    float(z_mapped)
-                ],
-                "orientation": [
-                    float(np.deg2rad(euler3["roll"])),
-                    float(np.deg2rad(euler3["pitch"])),
-                    float(np.deg2rad(euler3["yaw"]))
-                ],
-                "gripper": float(current_gripper),
-                "t": current_time
-            }
-            
-            # === 步骤5: 发送消息到B端和LeRobot（不同格式） ===
+            # === 步骤5: 发送JSON消息 ===
             try:
-                # 发送到B端（使用pickle序列化，匹配B_reverse_whole.py的TorchSerializer）
-                socket_to_b.send(pickle.dumps(message_for_b, protocol=pickle.HIGHEST_PROTOCOL))
-                
-                # 发送到本地LeRobot（使用JSON字符串）
-                socket_to_lerobot.send_string(json.dumps(message_for_lerobot))
-                
+                pub_socket.send_string(json.dumps(message))
                 publish_count += 1
             except Exception as e:
                 print(f"❌ ZeroMQ发送失败: {e}")
@@ -922,12 +593,6 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
                 print(f"│ 夹爪开合: [{gripper_bar}] {gripper_percent:5.1f}% ({current_gripper:.2f})".ljust(85) + "│")
                 
                 print(f"│ 发布频率: {actual_rate:.1f} Hz  │  消息数: {publish_count}".ljust(69) + "│")
-                
-                # 显示视频接收状态（如果启用）
-                if video_thread_running:
-                    latency_str = f"{video_last_latency:.1f}ms" if video_last_latency > 0 else "N/A"
-                    print(f"│ 📹 视频接收: 帧数={video_frame_count}, 延迟={latency_str}".ljust(69) + "│")
-                
                 print("└" + "─"*68 + "┘\n")
                 
                 publish_count = 0
@@ -940,8 +605,7 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             
     except KeyboardInterrupt:
         print(f"\n📊 发布器已停止 | 总发布: {publish_count} 条消息")
-        # 不要重新抛出异常，让程序正常返回到main()的finally块
-        return
+        raise
 
 
 def plot_trajectory():
@@ -1092,26 +756,21 @@ def plot_trajectory():
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(
-        description="三IMU机械臂ZeroMQ发布器 (RS485版本) - 双PUSH架构，参考A_real_video.py",
+        description="三IMU机械臂ZeroMQ发布器 (RS485版本) - 将双杆机械臂位置和机械爪姿态发布到MuJoCo",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例：
-  # 使用默认参数（发送到B端5555和本地LeRobot 5559）
+  # 使用默认参数（5Hz发布到localhost:5555）
+  python triple_imu_rs485_publisher.py
+  
+  # 仅在三个IMU都在线时发布（推荐）
   python triple_imu_rs485_publisher.py --online-only
   
-  # 自定义B端地址和LeRobot端口
-  python triple_imu_rs485_publisher.py --b-host 192.168.1.100 --b-port 5555 \\
-                                        --lerobot-port 5559 --online-only
+  # 自定义串口和发布频率
+  python triple_imu_rs485_publisher.py --port /dev/ttyUSB0 --baud 9600 --interval 0.1 --online-only
   
-  # 启用视频接收（从B端接收视频流）
-  python triple_imu_rs485_publisher.py --online-only --enable-video \\
-                                        --video-host 192.168.1.100 --video-port 5557
-  
-  # 完整示例（远程B端 + 本地LeRobot + 视频）
-  python triple_imu_rs485_publisher.py --online-only \\
-         --b-host 192.168.1.100 --b-port 5555 \\
-         --lerobot-host localhost --lerobot-port 5559 \\
-         --enable-video --video-host 192.168.1.100 --video-port 5557
+  # 绑定到所有网络接口
+  python triple_imu_rs485_publisher.py --bind tcp://0.0.0.0:5555 --online-only
 
 重要说明：
   - IMU1 (0x50): 杆1，用于计算末端位置
@@ -1119,34 +778,14 @@ def main():
   - IMU3 (0x52): 机械爪，提供姿态信息
   - position: 由IMU1和IMU2计算的机械臂末端位置（经过坐标映射）
   - orientation: 直接使用IMU3的欧拉角（机械爪姿态）
-  - gripper: 夹爪开合状态（键盘控制1/2）
+  - gripper: 夹爪开合状态（暂未实现，固定为0）
 
-ZeroMQ架构（参考A_real_video.py双线程PUSH/SUB模式）：
-  线程1（数据发送）：
-    - PUSH → B端:5555 (对应B_reverse_whole.py的PULL socket)
-    - PUSH → 本地LeRobot:5559 (对应lerobot_zeroMQ_imu.py的PULL socket)
-  
-  线程2（视频接收，可选）：
-    - SUB ← B端:5557 (对应B_reverse_whole.py的PUB socket)
-
-架构对比：
-  原始版本：A (PUB) → B (SUB) → C
-  新版本：  A (PUSH) → B (PULL) → C  (匹配B_reverse_whole.py)
-           A (PUSH) → LeRobot (PULL)  (本地MuJoCo仿真)
-           A (SUB)  ← B (PUB)         (视频流)
-
-数据流向：
-  传感器数据 → B端（转发到C和保存LeRobot数据集）
-  传感器数据 → 本地LeRobot（MuJoCo实时仿真）
-  视频流      ← B端（来自C端摄像头）
-  
-MuJoCo接收端（lerobot_zeroMQ_imu.py）：
-  监听端口: localhost:5559 (PULL模式)
-  数据格式：
+MuJoCo接收端：
+  接收到的数据格式：
     {
       "position": [x, y, z],           // 末端位置（米）
-      "orientation": [roll, pitch, yaw], // 机械爪姿态（弧度）
-      "gripper": 0.0-1.0,              // 夹爪开合（键盘控制）
+      "orientation": [roll, pitch, yaw], // 机械爪姿态（度）
+      "gripper": 0.0,
       "t": 1234567890.123
     }
         """
@@ -1157,26 +796,10 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
                         help="波特率，默认115200")
     parser.add_argument("--interval", "-i", type=float, default=DEFAULT_PUBLISH_INTERVAL,
                         help="发布间隔（秒），默认0.2（5Hz）")
-    parser.add_argument("--b-host", type=str, default=DEFAULT_B_HOST,
-                        help="B端服务器地址，默认localhost")
-    parser.add_argument("--b-port", type=int, default=DEFAULT_B_PORT_COMMAND,
-                        help="B端命令端口，默认5555")
-    parser.add_argument("--lerobot-host", type=str, default=DEFAULT_LEROBOT_HOST,
-                        help="本地LeRobot地址，默认localhost")
-    parser.add_argument("--lerobot-port", type=int, default=DEFAULT_LEROBOT_PORT,
-                        help="本地LeRobot端口，默认5559")
+    parser.add_argument("--bind", "-b", type=str, default=DEFAULT_BIND_ADDRESS,
+                        help="ZeroMQ绑定地址，默认tcp://127.0.0.1:5555")
     parser.add_argument("--online-only", action="store_true",
                         help="仅在三个IMU都在线时发布数据（推荐启用）")
-    parser.add_argument("--enable-video", action="store_true",
-                        help="启用视频接收功能（从B端接收视频流）")
-    parser.add_argument("--video-host", type=str, default="localhost",
-                        help="视频流服务器地址，默认localhost")
-    parser.add_argument("--video-port", type=int, default=DEFAULT_VIDEO_PORT,
-                        help="视频流端口，默认5557")
-    parser.add_argument("--enable-debug", action="store_true",
-                        help="启用调试数据发布功能（给Web UI后端）")
-    parser.add_argument("--debug-port", type=int, default=DEFAULT_DEBUG_PORT,
-                        help="调试数据发布端口，默认5560")
     
     args = parser.parse_args()
     
@@ -1191,39 +814,20 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
     print(f"杆1长度: {L1*1000:.0f} mm")
     print(f"杆2长度: {L2*1000:.0f} mm")
     print(f"Yaw归零模式: {YAW_NORMALIZATION_MODE}")
-    print("─"*70)
-    print(f"ZMQ发送到B端: tcp://{args.b_host}:{args.b_port} (PUSH模式)")
-    print(f"ZMQ发送到LeRobot: tcp://{args.lerobot_host}:{args.lerobot_port} (PUSH模式)")
-    if args.enable_video:
-        print(f"ZMQ接收视频: tcp://{args.video_host}:{args.video_port} (SUB模式)")
-        print(f"视频显示: {'启用' if ENABLE_VIDEO_DISPLAY else '禁用'}")
-    else:
-        print("ZMQ接收视频: 未启用（仅发送模式）")
     print("="*70 + "\n")
     
-    # 创建ZeroMQ上下文和socket（参考A_real_video.py双PUSH架构）
+    # 创建ZeroMQ上下文
     zmq_context = zmq.Context()
-    
-    # Socket 1: 发送传感器数据到B端（PUSH模式，匹配B的PULL）
-    socket_to_b = zmq_context.socket(zmq.PUSH)
-    
-    # Socket 2: 发送传感器数据到本地LeRobot（PUSH模式）
-    socket_to_lerobot = zmq_context.socket(zmq.PUSH)
+    pub_socket = zmq_context.socket(zmq.PUB)
     
     # RS485设备对象
     rs485_device = None
     
     try:
-        # 连接到B端（PUSH - connect模式）
-        b_address = f"tcp://{args.b_host}:{args.b_port}"
-        socket_to_b.connect(b_address)
-        print(f"✓ ZeroMQ PUSH socket已连接到B端: {b_address}")
-        
-        # 连接到本地LeRobot（PUSH - connect模式）
-        lerobot_address = f"tcp://{args.lerobot_host}:{args.lerobot_port}"
-        socket_to_lerobot.connect(lerobot_address)
-        print(f"✓ ZeroMQ PUSH socket已连接到LeRobot: {lerobot_address}")
-        print("  等待接收端准备就绪...\n")
+        # 绑定ZeroMQ
+        pub_socket.bind(args.bind)
+        print(f"✓ ZeroMQ PUB socket已绑定到 {args.bind}")
+        print("  等待订阅者连接...\n")
         
         time.sleep(0.5)
         
@@ -1271,37 +875,9 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         
         print("✓ 键盘控制已启动（双线程模式：按键检测 + 夹爪更新）\n")
         
-        # 启动视频接收线程（如果启用）
-        global video_thread_running
-        if args.enable_video:
-            video_thread_running = True
-            video_thread = threading.Thread(
-                target=video_receiver_thread, 
-                args=(args.video_host, args.video_port),
-                daemon=True, 
-                name="VideoReceiver"
-            )
-            video_thread.start()
-            print(f"✓ 视频接收已启动: {args.video_host}:{args.video_port}\n")
-        else:
-            print("⚠️  视频接收未启用（使用 --enable-video 启用）\n")
-        
-        # 启动调试数据发布线程（给Web UI后端）
-        if args.enable_debug:
-            debug_thread = threading.Thread(
-                target=debug_publisher_thread,
-                args=(args.debug_port,),
-                daemon=True,
-                name="DebugPublisher"
-            )
-            debug_thread.start()
-            print(f"✓ 调试数据发布已启动: tcp://*:{args.debug_port} (给Web UI后端)\n")
-        else:
-            print("⚠️  调试数据发布未启用（使用 --enable-debug 启用）\n")
-        
-        # 启动ZeroMQ发布循环（双PUSH模式）
+        # 启动ZeroMQ发布循环
         print("✓ 所有任务已启动，按Ctrl+C或'q'键停止\n")
-        publisher_loop(socket_to_b, socket_to_lerobot, args.interval, args.online_only)
+        publisher_loop(pub_socket, args.interval, args.online_only)
         
     except KeyboardInterrupt:
         print("\n\n✓ 程序已被用户中断")
@@ -1312,9 +888,8 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
     finally:
         print("\n正在清理资源...")
         
-        # 停止所有线程
+        # 停止键盘监听线程
         keyboard_thread_running = False
-        video_thread_running = False
         
         # 恢复终端设置
         if original_terminal_settings:
@@ -1326,32 +901,17 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         
         # 停止RS485设备
         if rs485_device and rs485_device.isOpen:
-            try:
-                print("正在停止IMU数据采集...")
-                rs485_device.stopLoopRead()
-                time.sleep(0.5)
-                rs485_device.closeDevice()
-                print("✓ RS485设备已关闭")
-            except KeyboardInterrupt:
-                print("⚠️  RS485设备关闭被中断，强制关闭")
-                try:
-                    rs485_device.closeDevice()
-                except:
-                    pass
-            except Exception as e:
-                print(f"⚠️  RS485设备关闭出错: {e}")
+            print("正在停止IMU数据采集...")
+            rs485_device.stopLoopRead()
+            time.sleep(0.5)
+            rs485_device.closeDevice()
+            print("✓ RS485设备已关闭")
         
         # 关闭ZeroMQ
         print("正在关闭ZeroMQ连接...")
-        try:
-            socket_to_b.close()
-            socket_to_lerobot.close()
-            zmq_context.term()
-            print("✓ ZeroMQ连接已关闭")
-        except KeyboardInterrupt:
-            print("⚠️  ZeroMQ清理被中断，强制关闭")
-        except Exception as e:
-            print(f"⚠️  ZeroMQ关闭出错: {e}")
+        pub_socket.close()
+        zmq_context.term()
+        print("✓ ZeroMQ连接已关闭")
         
         print("已断开所有连接")
         
@@ -1375,17 +935,12 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
             print("[IMU3] 未收到有效数据")
         print("="*70)
         
-        # 绘制轨迹（添加异常保护，确保即使用户按Ctrl+C也能执行）
-        try:
-            if len(trajectory_positions) > 0:
-                print("\n正在生成轨迹图...")
-                plot_trajectory()
-            else:
-                print("\n未记录到轨迹数据")
-        except KeyboardInterrupt:
-            print("\n⚠️  轨迹绘制被用户中断")
-        except Exception as e:
-            print(f"\n⚠️  轨迹绘制失败: {e}")
+        # 绘制轨迹
+        if len(trajectory_positions) > 0:
+            print("\n正在生成轨迹图...")
+            plot_trajectory()
+        else:
+            print("\n未记录到轨迹数据")
 
 
 if __name__ == '__main__':

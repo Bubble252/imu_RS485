@@ -1,0 +1,113 @@
+
+> imu-dashboard@1.0.0 start
+> react-scripts start
+
+(node:239677) [DEP_WEBPACK_DEV_SERVER_ON_AFTER_SETUP_MIDDLEWARE] DeprecationWarning: 'onAfterSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:239677) [DEP_WEBPACK_DEV_SERVER_ON_BEFORE_SETUP_MIDDLEWARE] DeprecationWarning: 'onBeforeSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+Starting the development server...
+
+Compiled with warnings.
+
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+[eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+Search for the keywords to learn more about each warning.
+To ignore, add // eslint-disable-next-line to the line before.
+
+WARNING in ./node_modules/@mediapipe/tasks-vision/vision_bundle.mjs
+Module Warning (from ./node_modules/source-map-loader/dist/cjs.js):
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+WARNING in [eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+webpack compiled with 2 warnings
+No issues found.
+Compiling...
+Compiled with warnings.
+
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+[eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+Search for the keywords to learn more about each warning.
+To ignore, add // eslint-disable-next-line to the line before.
+
+WARNING in ./node_modules/@mediapipe/tasks-vision/vision_bundle.mjs
+Module Warning (from ./node_modules/source-map-loader/dist/cjs.js):
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+WARNING in [eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+webpack compiled with 2 warnings
+Compiling...
+Files successfully emitted, waiting for typecheck results...
+Issues checking in progress...
+Compiled with warnings.
+
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+[eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+Search for the keywords to learn more about each warning.
+To ignore, add // eslint-disable-next-line to the line before.
+
+WARNING in ./node_modules/@mediapipe/tasks-vision/vision_bundle.mjs
+Module Warning (from ./node_modules/source-map-loader/dist/cjs.js):
+Failed to parse source map from '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map' file: Error: ENOENT: no such file or directory, open '/home/bubble/桌面/WIT_RS485/imu-dashboard/node_modules/@mediapipe/tasks-vision/vision_bundle_mjs.js.map'
+
+WARNING in [eslint] 
+src/components/IMUDashboard.tsx
+  Line 3:26:  'ThunderboltOutlined' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/NoiseAnalysis.tsx
+  Line 3:10:  'Line' is defined but never used  @typescript-eslint/no-unused-vars
+
+src/components/TrajectoryView3D.tsx
+  Line 1:17:  'useRef' is defined but never used  @typescript-eslint/no-unused-vars
+
+webpack compiled with 2 warnings
+Files successfully emitted, waiting for typecheck results...
+Issues checking in progress...
+No issues found.
