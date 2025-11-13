@@ -106,7 +106,7 @@ DEFAULT_VIDEO_HOST = "localhost"
 DEFAULT_VIDEO_PORT = 5557  # 从B端接收视频流
 
 DEFAULT_PUBLISH_INTERVAL = 0.2  # 5Hz
-ENABLE_VIDEO_DISPLAY = False  # 是否显示视频窗口（默认关闭，避免阻塞）
+ENABLE_VIDEO_DISPLAY = True  # 是否显示视频窗口（默认关闭，避免阻塞）
 
 # === Yaw归零模式 ===
 YAW_NORMALIZATION_MODE = "NORMAL"  # "NORMAL": 首次数据归零, "AUTO": 智能偏置, "SIMPLE": ±180翻转, "OFF": 不归零
@@ -751,7 +751,7 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
     
     参数：
         socket_to_b: 发送到B端的PUSH socket
-        socket_to_lerobot: 发送到本地LeRobot的PUSH socket
+        socket_to_lerobot: 发送到本地LeRobot的PUSH socket（可为None）
         publish_interval: 发布间隔（秒）
         online_only: 是否仅在三个IMU都在线时发布
     """
@@ -759,7 +759,10 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
     print("ZeroMQ发布器已启动（三IMU RS485模式 - 双PUSH架构）")
     print("="*70)
     print(f"发送到B端: {socket_to_b.getsockopt_string(zmq.LAST_ENDPOINT)}")
-    print(f"发送到LeRobot: {socket_to_lerobot.getsockopt_string(zmq.LAST_ENDPOINT)}")
+    if socket_to_lerobot is not None:
+        print(f"发送到LeRobot: {socket_to_lerobot.getsockopt_string(zmq.LAST_ENDPOINT)}")
+    else:
+        print(f"发送到LeRobot: 未启用")
     print(f"发布频率: {1.0/publish_interval:.1f} Hz (间隔 {publish_interval*1000:.0f} ms)")
     print(f"在线检查: {'启用（仅在三个IMU都在线时发布）' if online_only else '禁用（始终发布）'}")
     print(f"发送模式: PUSH (点对点队列)")
@@ -863,11 +866,12 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             
             # === 步骤5: 发送消息到B端和LeRobot（不同格式） ===
             try:
-                # 发送到B端（使用pickle序列化，匹配B_reverse_whole.py的TorchSerializer）
+                # 发送到B端（使用pickle序列化，阻塞模式，匹配A_real_video.py）
                 socket_to_b.send(pickle.dumps(message_for_b, protocol=pickle.HIGHEST_PROTOCOL))
                 
-                # 发送到本地LeRobot（使用JSON字符串）
-                socket_to_lerobot.send_string(json.dumps(message_for_lerobot))
+                # 发送到本地LeRobot（仅在启用时，使用JSON字符串）
+                if socket_to_lerobot is not None:
+                    socket_to_lerobot.send_string(json.dumps(message_for_lerobot))
                 
                 publish_count += 1
             except Exception as e:
@@ -1161,6 +1165,8 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
                         help="B端服务器地址，默认localhost")
     parser.add_argument("--b-port", type=int, default=DEFAULT_B_PORT_COMMAND,
                         help="B端命令端口，默认5555")
+    parser.add_argument("--enable-lerobot", action="store_true",
+                        help="启用本地LeRobot仿真通信（5559端口）")
     parser.add_argument("--lerobot-host", type=str, default=DEFAULT_LEROBOT_HOST,
                         help="本地LeRobot地址，默认localhost")
     parser.add_argument("--lerobot-port", type=int, default=DEFAULT_LEROBOT_PORT,
@@ -1193,7 +1199,10 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
     print(f"Yaw归零模式: {YAW_NORMALIZATION_MODE}")
     print("─"*70)
     print(f"ZMQ发送到B端: tcp://{args.b_host}:{args.b_port} (PUSH模式)")
-    print(f"ZMQ发送到LeRobot: tcp://{args.lerobot_host}:{args.lerobot_port} (PUSH模式)")
+    if args.enable_lerobot:
+        print(f"ZMQ发送到LeRobot: tcp://{args.lerobot_host}:{args.lerobot_port} (PUSH模式)")
+    else:
+        print("ZMQ发送到LeRobot: 未启用（使用--enable-lerobot启用）")
     if args.enable_video:
         print(f"ZMQ接收视频: tcp://{args.video_host}:{args.video_port} (SUB模式)")
         print(f"视频显示: {'启用' if ENABLE_VIDEO_DISPLAY else '禁用'}")
@@ -1206,9 +1215,12 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
     
     # Socket 1: 发送传感器数据到B端（PUSH模式，匹配B的PULL）
     socket_to_b = zmq_context.socket(zmq.PUSH)
+    # 简单配置，不设置复杂参数（参考A_real_video.py的成功经验）
     
-    # Socket 2: 发送传感器数据到本地LeRobot（PUSH模式）
-    socket_to_lerobot = zmq_context.socket(zmq.PUSH)
+    # Socket 2: 发送传感器数据到本地LeRobot（PUSH模式，可选）
+    socket_to_lerobot = None
+    if args.enable_lerobot:
+        socket_to_lerobot = zmq_context.socket(zmq.PUSH)
     
     # RS485设备对象
     rs485_device = None
@@ -1219,12 +1231,14 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         socket_to_b.connect(b_address)
         print(f"✓ ZeroMQ PUSH socket已连接到B端: {b_address}")
         
-        # 连接到本地LeRobot（PUSH - connect模式）
-        lerobot_address = f"tcp://{args.lerobot_host}:{args.lerobot_port}"
-        socket_to_lerobot.connect(lerobot_address)
-        print(f"✓ ZeroMQ PUSH socket已连接到LeRobot: {lerobot_address}")
+        # 连接到本地LeRobot（PUSH - connect模式，可选）
+        if args.enable_lerobot:
+            lerobot_address = f"tcp://{args.lerobot_host}:{args.lerobot_port}"
+            socket_to_lerobot.connect(lerobot_address)
+            print(f"✓ ZeroMQ PUSH socket已连接到LeRobot: {lerobot_address}")
         print("  等待接收端准备就绪...\n")
         
+        # 等待连接稳定（PUSH socket需要时间建立连接）
         time.sleep(0.5)
         
         # 初始化RS485设备
@@ -1345,7 +1359,8 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         print("正在关闭ZeroMQ连接...")
         try:
             socket_to_b.close()
-            socket_to_lerobot.close()
+            if socket_to_lerobot is not None:
+                socket_to_lerobot.close()
             zmq_context.term()
             print("✓ ZeroMQ连接已关闭")
         except KeyboardInterrupt:
