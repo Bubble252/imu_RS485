@@ -820,11 +820,6 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             y_mapped = Y_TARGET_MIN + (y_raw - Y_RAW_MIN) / (Y_RAW_MAX - Y_RAW_MIN) * (Y_TARGET_MAX - Y_TARGET_MIN)
             z_mapped = Z_TARGET_MIN + (z_raw - Z_RAW_MIN) / (Z_RAW_MAX - Z_RAW_MIN) * (Z_TARGET_MAX - Z_TARGET_MIN)
             
-            # 计算shoulder_pan角度（末端在xy平面投影相对于x轴的角度）
-            # 假设基座在原点(0, 0)，末端位置为(x_mapped, y_mapped)
-            shoulder_pan = np.arctan2(y_mapped, x_mapped)  # 弧度
-            shoulder_pan_deg = np.rad2deg(shoulder_pan)     # 度
-            
             # 读取夹爪值（带线程锁）
             with gripper_lock:
                 current_gripper = gripper_value
@@ -918,7 +913,6 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
                 print("├" + "─"*68 + "┤")
                 print(f"│ 原始位置: [{end_pos[0]:7.3f}, {end_pos[1]:7.3f}, {end_pos[2]:7.3f}] m".ljust(69) + "│")
                 print(f"│ 映射位置: [{x_mapped:7.3f}, {y_mapped:7.3f}, {z_mapped:7.3f}] m".ljust(69) + "│")
-                print(f"│ Shoulder Pan: {shoulder_pan_deg:7.2f}° ({shoulder_pan:7.4f} rad)".ljust(69) + "│")
                 
                 # 计算发送的orientation值（弧度）
                 sent_roll = float(np.deg2rad(euler3["roll"]))

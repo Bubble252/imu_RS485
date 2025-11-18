@@ -497,6 +497,8 @@ def debug_publisher_thread(debug_port=5560):
                         "L2": L2,
                         "yaw_mode": YAW_NORMALIZATION_MODE
                     }
+
+
                 }
                 
                 # === 发送JSON数据 ===
@@ -815,14 +817,17 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             y_raw = np.clip(end_pos[1], Y_RAW_MIN, Y_RAW_MAX)
             z_raw = np.clip(end_pos[2], Z_RAW_MIN, Z_RAW_MAX)
             
+            # 保存原始位置数据（用于robot_info）
+            last_position_raw = [x_raw, y_raw, z_raw]
+            
             # 线性映射到目标范围
             x_mapped = X_TARGET_MIN + (x_raw - X_RAW_MIN) / (X_RAW_MAX - X_RAW_MIN) * (X_TARGET_MAX - X_TARGET_MIN)
             y_mapped = Y_TARGET_MIN + (y_raw - Y_RAW_MIN) / (Y_RAW_MAX - Y_RAW_MIN) * (Y_TARGET_MAX - Y_TARGET_MIN)
             z_mapped = Z_TARGET_MIN + (z_raw - Z_RAW_MIN) / (Z_RAW_MAX - Z_RAW_MIN) * (Z_TARGET_MAX - Z_TARGET_MIN)
             
-            # 计算shoulder_pan角度（末端在xy平面投影相对于x轴的角度）
-            # 假设基座在原点(0, 0)，末端位置为(x_mapped, y_mapped)
-            shoulder_pan = np.arctan2(y_mapped, x_mapped)  # 弧度
+            # 计算shoulder_pan角度（使用raw数据，末端在xy平面投影相对于x轴的角度）
+            # 假设基座在原点(0, 0)，末端位置为(x_raw, y_raw)
+            shoulder_pan = np.arctan2(y_raw, x_raw)  # 弧度
             shoulder_pan_deg = np.rad2deg(shoulder_pan)     # 度
             
             # 读取夹爪值（带线程锁）
@@ -834,23 +839,30 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             message_for_b = {
                 "type": "control",  # 标识为控制命令
                 "timestamp": current_time,
-                "euler_angles": {
-                    "roll": float(np.rad2deg(np.deg2rad(euler3["roll"]))),   # 机械爪姿态（度）
-                    "pitch": float(np.rad2deg(np.deg2rad(euler3["pitch"]))),
-                    "yaw": float(np.rad2deg(np.deg2rad(euler3["yaw"])))
-                },
-                "position": [
-                    float(x_mapped),  # x (米)
-                    float(y_mapped),  # y (米)
-                    float(z_mapped)   # z (米)
-                ],
-                "orientation": [
-                    float(np.deg2rad(euler3["roll"])),   # Roll（弧度）
-                    float(np.deg2rad(euler3["pitch"])),  # Pitch（弧度）
-                    float(np.deg2rad(euler3["yaw"]))     # Yaw（弧度）
-                ],
-                "gripper": float(current_gripper),  # 夹爪状态 (0.0-1.0)
-                "throttle": 0.5  # 油门值（暂时固定）
+                # "euler_angles": {
+                #     "roll": float(np.rad2deg(np.deg2rad(euler3["roll"]))),   # 机械爪姿态（度）
+                #     "pitch": float(np.rad2deg(np.deg2rad(euler3["pitch"]))),
+                #     "yaw": float(np.rad2deg(np.deg2rad(euler3["yaw"])))
+                # },
+                # "position": [
+                #     float(x_mapped),  # x (米)
+                #     float(y_mapped),  # y (米)
+                #     float(z_mapped)   # z (米)
+                # ],
+                # "orientation": [
+                #     float(np.deg2rad(euler3["roll"])),   # Roll（弧度）
+                #     float(np.deg2rad(euler3["pitch"])),  # Pitch（弧度）
+                #     float(np.deg2rad(euler3["yaw"]))     # Yaw（弧度）
+                # ],
+                "robot_info": {
+                    "shoulder_pan": float(shoulder_pan),  # 肩部转角（弧度，从raw数据计算）
+                    "wrist_roll": float(np.deg2rad(euler3["roll"])),  # 手腕roll（弧度）
+                    "pitch": float(np.deg2rad(euler3["pitch"])),     # pitch（弧度）
+                    "x": float(end_pos[0]),    # 原始x坐标（米）
+                    "y": float(end_pos[2]),     # 原始z坐标映射到y（坐标系转换）
+                    "gripper": float(current_gripper)  # 夹爪状态 (0.0-1.0)
+                }
+
             }
             
             # 为本地LeRobot准备的消息（JSON格式，保持原有格式）

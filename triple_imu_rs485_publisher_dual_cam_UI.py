@@ -178,6 +178,9 @@ KEY_TIMEOUT = 0.1  # 按键超时时间（秒）- 超过此时间视为松开
 video_thread_running = False
 video_frame_count = 0
 video_last_latency = 0.0
+latest_video_left = None    # 最新的左腕摄像头JPEG数据
+latest_video_top = None     # 最新的顶部摄像头JPEG数据
+video_lock = threading.Lock()  # 视频帧访问锁
 
 
 def keyboard_listener():
@@ -275,11 +278,12 @@ def gripper_update_thread():
 
 def video_receiver_thread(video_host="localhost", video_port=5557):
     """
-    视频接收线程 - 从B端接收视频流（参考A_real_video.py）
+    视频接收线程 - 从B端接收视频流（支持双摄像头：left_wrist + top）
     """
     global video_thread_running, video_frame_count, video_last_latency
+    global latest_video_left, latest_video_top, video_lock
     
-    print(f"\n📹 启动视频接收线程: {video_host}:{video_port}")
+    print(f"\n📹 启动视频接收线程（双摄像头模式）: {video_host}:{video_port}")
     
     try:
         # 创建独立的ZMQ上下文（避免与发布端冲突）
@@ -292,12 +296,14 @@ def video_receiver_thread(video_host="localhost", video_port=5557):
         
         print(f"✓ 视频接收已连接到 {video_host}:{video_port}")
         
-        # 创建窗口（如果启用显示）
+        # 创建双摄像头窗口（如果启用显示）
         if ENABLE_VIDEO_DISPLAY:
             try:
-                cv2.namedWindow('Remote Video from B', cv2.WINDOW_NORMAL)
-                cv2.resizeWindow('Remote Video from B', 640, 480)
-                print("✓ OpenCV视频窗口已创建")
+                cv2.namedWindow('Left Wrist Camera', cv2.WINDOW_NORMAL)
+                cv2.resizeWindow('Left Wrist Camera', 640, 480)
+                cv2.namedWindow('Top Camera', cv2.WINDOW_NORMAL)
+                cv2.resizeWindow('Top Camera', 640, 480)
+                print("✓ OpenCV双摄像头窗口已创建（Left Wrist + Top）")
             except Exception as e:
                 print(f"⚠️  OpenCV窗口创建失败（可能无显示环境）: {e}")
         
@@ -326,31 +332,66 @@ def video_receiver_thread(video_host="localhost", video_port=5557):
                     if 'timestamp' in frame_dict:
                         video_last_latency = (recv_time - frame_dict['timestamp']) * 1000  # ms
                     
-                    # 解码视频帧
-                    if ENABLE_VIDEO_DISPLAY and 'image' in frame_dict:
+                    # 保存和解码双摄像头视频帧
+                    if frame_dict.get('encoding') == 'jpeg':
                         try:
-                            if frame_dict.get('encoding') == 'jpeg':
-                                encoded_data = frame_dict['image']
-                                if isinstance(encoded_data, bytes):
-                                    nparr = np.frombuffer(encoded_data, np.uint8)
-                                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            # 处理左腕摄像头
+                            if 'image.left_wrist' in frame_dict:
+                                encoded_data_left = frame_dict['image.left_wrist']
+                                if isinstance(encoded_data_left, bytes):
+                                    # 保存到全局变量供PyQt5 UI使用
+                                    with video_lock:
+                                        latest_video_left = encoded_data_left
                                     
-                                    if frame is not None:
-                                        # 叠加信息
-                                        cv2.putText(frame, f"Frames: {video_frame_count}", 
-                                                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                                                   0.6, (0, 255, 255), 2)
-                                        if video_last_latency > 0:
-                                            cv2.putText(frame, f"Latency: {video_last_latency:.1f}ms", 
-                                                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
-                                                       0.6, (0, 255, 0), 2)
+                                    # OpenCV显示（如果启用）
+                                    if ENABLE_VIDEO_DISPLAY:
+                                        nparr_left = np.frombuffer(encoded_data_left, np.uint8)
+                                        frame_left = cv2.imdecode(nparr_left, cv2.IMREAD_COLOR)
                                         
-                                        cv2.imshow('Remote Video from B', frame)
-                                        # 按 'q' 退出
-                                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                                            print("\n⚠️  视频窗口按下'q'，退出...")
-                                            video_thread_running = False
-                                            break
+                                        if frame_left is not None:
+                                            # 叠加信息
+                                            cv2.putText(frame_left, f"Left Wrist - Frame: {video_frame_count}", 
+                                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                                                       0.6, (0, 255, 255), 2)
+                                            if video_last_latency > 0:
+                                                cv2.putText(frame_left, f"Latency: {video_last_latency:.1f}ms", 
+                                                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
+                                                           0.6, (0, 255, 0), 2)
+                                            
+                                            cv2.imshow('Left Wrist Camera', frame_left)
+                            
+                            # 处理顶部摄像头
+                            if 'image.top' in frame_dict:
+                                encoded_data_top = frame_dict['image.top']
+                                if isinstance(encoded_data_top, bytes):
+                                    # 保存到全局变量供PyQt5 UI使用
+                                    with video_lock:
+                                        latest_video_top = encoded_data_top
+                                    
+                                    # OpenCV显示（如果启用）
+                                    if ENABLE_VIDEO_DISPLAY:
+                                        nparr_top = np.frombuffer(encoded_data_top, np.uint8)
+                                        frame_top = cv2.imdecode(nparr_top, cv2.IMREAD_COLOR)
+                                        
+                                        if frame_top is not None:
+                                            # 叠加信息
+                                            cv2.putText(frame_top, f"Top - Frame: {video_frame_count}", 
+                                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                                                       0.6, (0, 255, 255), 2)
+                                            if video_last_latency > 0:
+                                                cv2.putText(frame_top, f"Latency: {video_last_latency:.1f}ms", 
+                                                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
+                                                           0.6, (0, 255, 0), 2)
+                                            
+                                            cv2.imshow('Top Camera', frame_top)
+                            
+                            # 按 'q' 退出（仅在OpenCV显示模式）
+                            if ENABLE_VIDEO_DISPLAY:
+                                if cv2.waitKey(1) & 0xFF == ord('q'):
+                                    print("\n⚠️  视频窗口按下'q'，退出...")
+                                    video_thread_running = False
+                                    break
+                                
                         except Exception as e:
                             if video_frame_count % 30 == 0:
                                 print(f"⚠️  视频解码失败: {e}")
@@ -358,7 +399,13 @@ def video_receiver_thread(video_host="localhost", video_port=5557):
                     # 每30帧打印一次日志
                     if video_frame_count % 30 == 0:
                         latency_str = f"{video_last_latency:.1f}ms" if video_last_latency > 0 else "N/A"
-                        print(f"📹 [视频] 接收帧 #{video_frame_count}, 延迟: {latency_str}")
+                        cameras_info = []
+                        if 'image.left_wrist' in frame_dict:
+                            cameras_info.append("left_wrist")
+                        if 'image.top' in frame_dict:
+                            cameras_info.append("top")
+                        cameras_str = "+".join(cameras_info) if cameras_info else "N/A"
+                        print(f"📹 [视频] 接收帧 #{video_frame_count}, 摄像头: [{cameras_str}], 延迟: {latency_str}")
             
             except zmq.Again:
                 # 超时，继续循环
@@ -385,9 +432,9 @@ def video_receiver_thread(video_host="localhost", video_port=5557):
 
 def debug_publisher_thread(debug_port=5560):
     """
-    调试数据发布线程 - 发送实时数据给Web UI后端（独立运行，不影响主逻辑）
+    调试数据发布线程 - 发送实时数据给PyQt5 UI（独立运行，不影响主逻辑）
     
-    发布格式：JSON over ZeroMQ PUB
+    发布格式：Pickle over ZeroMQ PUB（包含视频帧）
     端口：5560（默认）
     频率：20Hz（避免UI过载）
     
@@ -398,11 +445,14 @@ def debug_publisher_thread(debug_port=5560):
         "position": {"raw": [x,y,z], "mapped": [x,y,z]},
         "gripper": 0.0-1.0,
         "online_status": {"imu1": true/false, ...},
-        "stats": {"publish_rate": ..., "message_count": ...}
+        "stats": {"publish_rate": ..., "message_count": ...},
+        "video_left": <JPEG bytes or None>,
+        "video_top": <JPEG bytes or None>
     }
     """
     global imu1_euler, imu2_euler, imu3_euler, gripper_value
     global imu1_last_update, imu2_last_update, imu3_last_update
+    global latest_video_left, latest_video_top, video_lock
     
     print(f"\n🔧 启动调试数据发布线程: tcp://*:{debug_port}")
     
@@ -460,6 +510,11 @@ def debug_publisher_thread(debug_port=5560):
                 with gripper_lock:
                     current_gripper = float(gripper_value)
                 
+                # === 读取最新视频帧 ===
+                with video_lock:
+                    current_video_left = latest_video_left
+                    current_video_top = latest_video_top
+                
                 # === 构造调试数据包 ===
                 debug_data = {
                     "timestamp": current_time,
@@ -490,17 +545,21 @@ def debug_publisher_thread(debug_port=5560):
                     },
                     "stats": {
                         "publish_count": publish_count,
-                        "publish_rate": last_publish_rate
+                        "publish_rate": last_publish_rate,
+                        "video_frame_count": video_frame_count,
+                        "video_latency": video_last_latency
                     },
                     "config": {
                         "L1": L1,
                         "L2": L2,
                         "yaw_mode": YAW_NORMALIZATION_MODE
-                    }
+                    },
+                    "video_left": current_video_left,  # JPEG bytes or None
+                    "video_top": current_video_top     # JPEG bytes or None
                 }
                 
-                # === 发送JSON数据 ===
-                debug_socket.send_json(debug_data)
+                # === 发送Pickle数据（支持bytes类型）===
+                debug_socket.send_pyobj(debug_data)
                 publish_count += 1
                 
                 # 每50次打印一次日志（避免刷屏）
@@ -815,14 +874,17 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             y_raw = np.clip(end_pos[1], Y_RAW_MIN, Y_RAW_MAX)
             z_raw = np.clip(end_pos[2], Z_RAW_MIN, Z_RAW_MAX)
             
+            # 保存原始位置数据（用于robot_info）
+            last_position_raw = [x_raw, y_raw, z_raw]
+            
             # 线性映射到目标范围
             x_mapped = X_TARGET_MIN + (x_raw - X_RAW_MIN) / (X_RAW_MAX - X_RAW_MIN) * (X_TARGET_MAX - X_TARGET_MIN)
             y_mapped = Y_TARGET_MIN + (y_raw - Y_RAW_MIN) / (Y_RAW_MAX - Y_RAW_MIN) * (Y_TARGET_MAX - Y_TARGET_MIN)
             z_mapped = Z_TARGET_MIN + (z_raw - Z_RAW_MIN) / (Z_RAW_MAX - Z_RAW_MIN) * (Z_TARGET_MAX - Z_TARGET_MIN)
             
-            # 计算shoulder_pan角度（末端在xy平面投影相对于x轴的角度）
-            # 假设基座在原点(0, 0)，末端位置为(x_mapped, y_mapped)
-            shoulder_pan = np.arctan2(y_mapped, x_mapped)  # 弧度
+            # 计算shoulder_pan角度（使用raw数据，末端在xy平面投影相对于x轴的角度）
+            # 假设基座在原点(0, 0)，末端位置为(x_raw, y_raw)
+            shoulder_pan = np.arctan2(y_raw, x_raw)  # 弧度
             shoulder_pan_deg = np.rad2deg(shoulder_pan)     # 度
             
             # 读取夹爪值（带线程锁）
@@ -834,23 +896,30 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
             message_for_b = {
                 "type": "control",  # 标识为控制命令
                 "timestamp": current_time,
-                "euler_angles": {
-                    "roll": float(np.rad2deg(np.deg2rad(euler3["roll"]))),   # 机械爪姿态（度）
-                    "pitch": float(np.rad2deg(np.deg2rad(euler3["pitch"]))),
-                    "yaw": float(np.rad2deg(np.deg2rad(euler3["yaw"])))
-                },
-                "position": [
-                    float(x_mapped),  # x (米)
-                    float(y_mapped),  # y (米)
-                    float(z_mapped)   # z (米)
-                ],
-                "orientation": [
-                    float(np.deg2rad(euler3["roll"])),   # Roll（弧度）
-                    float(np.deg2rad(euler3["pitch"])),  # Pitch（弧度）
-                    float(np.deg2rad(euler3["yaw"]))     # Yaw（弧度）
-                ],
-                "gripper": float(current_gripper),  # 夹爪状态 (0.0-1.0)
-                "throttle": 0.5  # 油门值（暂时固定）
+                # "euler_angles": {
+                #     "roll": float(np.rad2deg(np.deg2rad(euler3["roll"]))),   # 机械爪姿态（度）
+                #     "pitch": float(np.rad2deg(np.deg2rad(euler3["pitch"]))),
+                #     "yaw": float(np.rad2deg(np.deg2rad(euler3["yaw"])))
+                # },
+                # "position": [
+                #     float(x_mapped),  # x (米)
+                #     float(y_mapped),  # y (米)
+                #     float(z_mapped)   # z (米)
+                # ],
+                # "orientation": [
+                #     float(np.deg2rad(euler3["roll"])),   # Roll（弧度）
+                #     float(np.deg2rad(euler3["pitch"])),  # Pitch（弧度）
+                #     float(np.deg2rad(euler3["yaw"]))     # Yaw（弧度）
+                # ],
+                "robot_info": {
+                    "shoulder_pan": float(shoulder_pan),  # 肩部转角（弧度，从raw数据计算）
+                    "wrist_roll": float(np.deg2rad(euler3["roll"])),  # 手腕roll（弧度）
+                    "pitch": float(np.deg2rad(euler3["pitch"])),     # pitch（弧度）
+                    "x": float(end_pos[0]),    # 原始x坐标（米）
+                    "y": float(end_pos[2]),     # 原始z坐标映射到y（坐标系转换）
+                    "gripper": float(current_gripper)  # 夹爪状态 (0.0-1.0)
+                }
+
             }
             
             # 为本地LeRobot准备的消息（JSON格式，保持原有格式）
@@ -954,19 +1023,28 @@ def publisher_loop(socket_to_b, socket_to_lerobot, publish_interval, online_only
         return
 
 
-def plot_trajectory():
+def plot_trajectory(use_agg_backend=False):
     """
     绘制机械臂末端的3D运动轨迹
     借鉴dual_imu_euler.py的完整绘图功能
+    
+    Args:
+        use_agg_backend: 是否使用Agg后端（非GUI，避免Qt冲突）
     """
     if len(trajectory_positions) == 0:
         print("没有记录到轨迹数据")
         return
     
     try:
+        import matplotlib
+        
+        # 如果需要，强制使用Agg后端（非GUI，避免Qt冲突）
+        if use_agg_backend:
+            matplotlib.use('Agg')
+            print("ℹ️  使用matplotlib Agg后端（非GUI模式）")
+        
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
-        import matplotlib
         
         # 设置中文字体（避免中文显示为方框）
         matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial Unicode MS', 'SimHei']
@@ -1189,6 +1267,8 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
                         help="启用调试数据发布功能（给Web UI后端）")
     parser.add_argument("--debug-port", type=int, default=DEFAULT_DEBUG_PORT,
                         help="调试数据发布端口，默认5560")
+    parser.add_argument("--disable-trajectory-plot", action="store_true",
+                        help="禁用程序退出时的matplotlib 3D轨迹图生成（避免Qt冲突）")
     
     args = parser.parse_args()
     
@@ -1397,16 +1477,20 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         print("="*70)
         
         # 绘制轨迹（添加异常保护，确保即使用户按Ctrl+C也能执行）
-        try:
-            if len(trajectory_positions) > 0:
-                print("\n正在生成轨迹图...")
-                plot_trajectory()
-            else:
-                print("\n未记录到轨迹数据")
-        except KeyboardInterrupt:
-            print("\n⚠️  轨迹绘制被用户中断")
-        except Exception as e:
-            print(f"\n⚠️  轨迹绘制失败: {e}")
+        if not args.disable_trajectory_plot:
+            try:
+                if len(trajectory_positions) > 0:
+                    print("\n正在生成轨迹图...")
+                    # 使用Agg后端避免Qt冲突（在lerobot环境中opencv-python和PyQt5冲突）
+                    plot_trajectory(use_agg_backend=True)
+                else:
+                    print("\n未记录到轨迹数据")
+            except KeyboardInterrupt:
+                print("\n⚠️  轨迹绘制被用户中断")
+            except Exception as e:
+                print(f"\n⚠️  轨迹绘制失败: {e}")
+        else:
+            print("\n✅ 轨迹图生成已禁用（--disable-trajectory-plot）")
 
 
 if __name__ == '__main__':
