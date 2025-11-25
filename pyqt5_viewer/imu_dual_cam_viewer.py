@@ -26,6 +26,8 @@ from widgets.imu_panel import IMUPanelWidget
 from widgets.trajectory_3d import Trajectory3DWidget
 from widgets.chart_panel import ChartPanelWidget
 from widgets.control_panel import ControlPanelWidget
+from widgets.gripper_control import GripperControlWidget
+from widgets.audio_waveform import AudioWaveformWidget
 
 
 class ZMQDataReceiver(QThread):
@@ -124,9 +126,15 @@ class IMUDualCamViewer(QMainWindow):
         self.trajectory_panel = None
         self.chart_panel = None
         self.control_panel = None
+        self.gripper_control_panel = None
+        self.audio_waveform_panel = None
         
         # ZMQ接收线程
         self.zmq_receiver = None
+        
+        # ZMQ发送socket（用于发送夹爪控制命令）
+        self.command_socket = None
+        self.command_context = None
         
         # 统计信息
         self.ui_update_count = 0
@@ -144,7 +152,7 @@ class IMUDualCamViewer(QMainWindow):
     def init_ui(self):
         """初始化UI布局"""
         self.setWindowTitle("IMU 3D Visualization & Dual Camera Viewer")
-        self.setGeometry(100, 100, 1600, 1000)
+        self.setGeometry(50, 50, 1800, 850)  # 调整：宽度1600→1800，高度1000→850
         
         # 中央窗口
         central_widget = QWidget()
@@ -162,12 +170,18 @@ class IMUDualCamViewer(QMainWindow):
         self.control_panel.export_clicked.connect(self.on_export_clicked)
         left_layout.addWidget(self.control_panel)
         
+        # 【新增】夹爪控制面板
+        self.gripper_control_panel = GripperControlWidget()
+        self.gripper_control_panel.gripper_command.connect(self.on_gripper_command)
+        self.gripper_control_panel.gripper_value_changed.connect(self.on_gripper_value_set)
+        left_layout.addWidget(self.gripper_control_panel)
+        
         # IMU数据面板
         self.imu_panel = IMUPanelWidget()
         left_layout.addWidget(self.imu_panel)
         
         left_layout.addStretch()
-        left_widget.setMaximumWidth(300)
+        left_widget.setMaximumWidth(380)  # 增加宽度以容纳新面板（350→380）
         
         # === 中间：双摄像头 ===
         middle_widget = QWidget()
@@ -177,23 +191,35 @@ class IMUDualCamViewer(QMainWindow):
         self.video_panel = VideoPanelWidget()
         middle_layout.addWidget(self.video_panel)
         
-        # === 右侧：3D轨迹 + 曲线图 ===
+        # === 右侧：3D轨迹 + 曲线图 + 音频 ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(5, 5, 5, 5)
         
         # 3D轨迹
         self.trajectory_panel = Trajectory3DWidget()
-        right_layout.addWidget(self.trajectory_panel, 3)
+        right_layout.addWidget(self.trajectory_panel, 5)  # 调整比例：使用整数5
         
-        # 曲线图
+        # 底部：曲线图 + 音频波形（水平排列）
+        bottom_widget = QWidget()
+        bottom_layout = QHBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 曲线图（左）- 缩小
         self.chart_panel = ChartPanelWidget()
-        right_layout.addWidget(self.chart_panel, 2)
+        bottom_layout.addWidget(self.chart_panel, 2)  # 曲线图占2份（缩小：3→2）
+        
+        # 【新增】音频波形面板（右）- 放大
+        self.audio_waveform_panel = AudioWaveformWidget()
+        bottom_layout.addWidget(self.audio_waveform_panel, 3)  # 音频占3份（放大：2→3）
+        
+        right_layout.addWidget(bottom_widget, 4)  # 底部整体占4份
         
         # === 组装布局 ===
-        main_layout.addWidget(left_widget, 1)
-        main_layout.addWidget(middle_widget, 2)
-        main_layout.addWidget(right_widget, 2)
+        # 调整比例：左侧控制2份，中间视频5份，右侧图表4份 (2:5:4)
+        main_layout.addWidget(left_widget, 2)
+        main_layout.addWidget(middle_widget, 5)
+        main_layout.addWidget(right_widget, 4)
         
         # 状态栏
         self.status_bar = QStatusBar()
@@ -201,11 +227,23 @@ class IMUDualCamViewer(QMainWindow):
         self.status_bar.showMessage("等待连接...")
     
     def start_zmq_receiver(self):
-        """启动ZMQ接收线程"""
+        """启动ZMQ接收线程和命令发送socket"""
+        # 启动数据接收线程
         self.zmq_receiver = ZMQDataReceiver(self.zmq_host, self.zmq_port)
         self.zmq_receiver.data_received.connect(self.on_data_received)
         self.zmq_receiver.connection_status.connect(self.on_connection_status)
         self.zmq_receiver.start()
+        
+        # 初始化命令发送socket（PUSH模式，发送到主程序的PULL端口5562）
+        try:
+            import zmq
+            self.command_context = zmq.Context()
+            self.command_socket = self.command_context.socket(zmq.PUSH)
+            self.command_socket.connect("tcp://localhost:5562")
+            print("✓ UI命令发送socket已连接到 tcp://localhost:5562")
+        except Exception as e:
+            print(f"⚠️  初始化命令发送socket失败: {e}")
+            self.command_socket = None
     
     def on_data_received(self, data):
         """处理接收到的数据"""
@@ -219,6 +257,8 @@ class IMUDualCamViewer(QMainWindow):
             self.update_trajectory(data)
             self.update_charts(data)
             self.update_control_panel(data)
+            self.update_gripper_display(data)
+            self.update_audio_display(data)
             
         except Exception as e:
             print(f"⚠️  UI更新错误: {e}")
@@ -287,6 +327,59 @@ class IMUDualCamViewer(QMainWindow):
         else:
             self.status_bar.showMessage(f"⚠ {message}")
     
+    def update_gripper_display(self, data):
+        """更新夹爪显示"""
+        gripper_value = data.get("gripper", 0.0)
+        self.gripper_control_panel.update_from_robot(gripper_value)
+    
+    def update_audio_display(self, data):
+        """更新音频显示"""
+        audio_data = data.get("audio", {})
+        if audio_data:
+            self.audio_waveform_panel.update_audio_data(audio_data)
+    
+    def on_gripper_command(self, command):
+        """
+        处理夹爪控制命令
+        
+        Args:
+            command: "open" 或 "close" 或 "stop"
+        """
+        if not self.command_socket:
+            print("⚠️  命令socket未初始化")
+            return
+        
+        try:
+            cmd_data = {
+                "type": "gripper_command",
+                "action": command
+            }
+            self.command_socket.send_pyobj(cmd_data)
+            print(f"[夹爪控制] 发送命令: {command}")
+        except Exception as e:
+            print(f"❌ 发送夹爪命令失败: {e}")
+    
+    def on_gripper_value_set(self, value):
+        """
+        设置夹爪到指定值
+        
+        Args:
+            value: 0.0-1.0
+        """
+        if not self.command_socket:
+            print("⚠️  命令socket未初始化")
+            return
+        
+        try:
+            cmd_data = {
+                "type": "gripper_value",
+                "value": float(value)
+            }
+            self.command_socket.send_pyobj(cmd_data)
+            print(f"[夹爪控制] 设置值: {value:.2f}")
+        except Exception as e:
+            print(f"❌ 设置夹爪值失败: {e}")
+    
     def update_fps(self):
         """更新UI FPS"""
         current_time = time.time()
@@ -315,6 +408,19 @@ class IMUDualCamViewer(QMainWindow):
         print("\n正在关闭UI...")
         if self.zmq_receiver:
             self.zmq_receiver.stop()
+        
+        # 关闭命令socket
+        if self.command_socket:
+            try:
+                self.command_socket.close()
+            except:
+                pass
+        if self.command_context:
+            try:
+                self.command_context.term()
+            except:
+                pass
+        
         event.accept()
 
 

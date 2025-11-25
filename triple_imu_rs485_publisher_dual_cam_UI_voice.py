@@ -123,6 +123,9 @@ DEFAULT_LEROBOT_PORT = 5559  # 本地LeRobot接收端口（独立端口避免冲
 # 发送调试数据到Web UI后端（PUB模式）
 DEFAULT_DEBUG_PORT = 5560  # 调试数据发布端口（给debug_server.py订阅）
 
+# 接收UI控制命令（PULL模式）
+DEFAULT_UI_COMMAND_PORT = 5562  # UI命令接收端口（PyQt5 UI发送夹爪等控制命令）
+
 # 接收B端视频流（SUB模式，对应B的SERVER_B_PORT_FOR_A_VIDEO）
 DEFAULT_VIDEO_HOST = "localhost"
 DEFAULT_VIDEO_PORT = 5557  # 从B端接收视频流
@@ -222,6 +225,12 @@ audio_buffer_queue = None  # 音频缓冲队列（queue.Queue）
 audio_opus_decoder = None  # Opus 解码器
 audio_stream = None        # sounddevice 音频流
 
+# === 音频可视化数据（给UI显示） ===
+latest_audio_waveform = None  # 最新音频波形（numpy array, 256个int16样本）
+latest_audio_rms = 0.0        # 最新音频RMS音量（0.0-1.0）
+audio_underrun_count = 0      # 音频下溢计数
+audio_data_lock = threading.Lock()  # 音频数据访问锁
+
 
 def keyboard_listener():
     """
@@ -314,6 +323,75 @@ def gripper_update_thread():
         time.sleep(GRIPPER_UPDATE_RATE)
     
     print()  # 换行
+
+
+def ui_command_receiver_thread(command_port=5562):
+    """
+    UI命令接收线程 - 接收PyQt5 UI发来的控制命令
+    
+    使用PULL socket接收命令，格式：
+    {
+        "type": "gripper_command" | "gripper_value",
+        "action": "open" | "close",  # 仅gripper_command使用
+        "value": 0.0-1.0              # 仅gripper_value使用
+    }
+    """
+    global gripper_value, keyboard_thread_running
+    
+    print(f"\n🎮 启动UI命令接收线程: tcp://*:{command_port}")
+    
+    try:
+        # 创建独立的ZMQ上下文
+        command_context = zmq.Context()
+        command_socket = command_context.socket(zmq.PULL)
+        command_socket.bind(f"tcp://*:{command_port}")
+        
+        # 设置1秒超时，避免阻塞退出
+        command_socket.setsockopt(zmq.RCVTIMEO, 1000)
+        
+        print(f"✓ UI命令PULL socket已绑定到端口 {command_port}")
+        
+        while keyboard_thread_running:
+            try:
+                # 接收命令
+                msg_bytes = command_socket.recv()
+                msg = pickle.loads(msg_bytes)
+                
+                msg_type = msg.get("type")
+                
+                if msg_type == "gripper_command":
+                    # 处理开关命令
+                    action = msg.get("action")
+                    with gripper_lock:
+                        if action == "open":
+                            gripper_value = 1.0
+                            print(f"🎮 [UI命令] 夹爪全开: {gripper_value:.3f}")
+                        elif action == "close":
+                            gripper_value = 0.0
+                            print(f"🎮 [UI命令] 夹爪全闭: {gripper_value:.3f}")
+                
+                elif msg_type == "gripper_value":
+                    # 处理精确值设置
+                    value = msg.get("value", 0.0)
+                    with gripper_lock:
+                        gripper_value = max(0.0, min(1.0, value))
+                        print(f"🎮 [UI命令] 设置夹爪值: {gripper_value:.3f}")
+                
+            except zmq.Again:
+                # 超时，继续循环
+                pass
+            except Exception as e:
+                print(f"⚠️  UI命令解析失败: {e}")
+    
+    except Exception as e:
+        print(f"❌ UI命令接收线程异常: {e}")
+    finally:
+        try:
+            command_socket.close()
+            command_context.term()
+        except:
+            pass
+        print("✓ UI命令接收线程已退出")
 
 
 def video_receiver_thread(video_host="localhost", video_port=5557):
@@ -621,6 +699,24 @@ def audio_player_thread():
                 
                 decoded_count += 1
                 
+                # === 保存音频波形数据供UI显示（256个样本） ===
+                try:
+                    # 采样：每个Opus帧通常480或960样本，我们需要256个显示
+                    sample_step = max(1, len(audio_array) // 256)
+                    waveform_samples = audio_array[::sample_step][:256]
+                    
+                    # 计算RMS音量
+                    rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
+                    rms_normalized = min(1.0, rms / 8192.0)  # int16最大值32768，归一化到0-1
+                    
+                    with audio_data_lock:
+                        global latest_audio_waveform, latest_audio_rms, audio_underrun_count
+                        latest_audio_waveform = waveform_samples
+                        latest_audio_rms = rms_normalized
+                        audio_underrun_count = underrun_count
+                except Exception as e:
+                    pass  # 静默失败，不影响音频播放
+                
                 # 统计信息
                 if decoded_count % 50 == 0:
                     queue_size = audio_buffer_queue.qsize()
@@ -740,6 +836,12 @@ def debug_publisher_thread(debug_port=5560):
                     current_video_left = latest_video_left
                     current_video_top = latest_video_top
                 
+                # === 读取最新音频数据 ===
+                with audio_data_lock:
+                    current_audio_waveform = latest_audio_waveform
+                    current_audio_rms = latest_audio_rms
+                    current_audio_underrun = audio_underrun_count
+                
                 # === 构造调试数据包 ===
                 debug_data = {
                     "timestamp": current_time,
@@ -780,7 +882,14 @@ def debug_publisher_thread(debug_port=5560):
                         "yaw_mode": YAW_NORMALIZATION_MODE
                     },
                     "video_left": current_video_left,  # JPEG bytes or None
-                    "video_top": current_video_top     # JPEG bytes or None
+                    "video_top": current_video_top,    # JPEG bytes or None
+                    "audio": {
+                        "waveform": current_audio_waveform.tolist() if current_audio_waveform is not None else [],
+                        "rms": float(current_audio_rms),
+                        "frame_count": audio_frame_count,
+                        "underrun_count": current_audio_underrun,
+                        "receiving": audio_thread_running
+                    }
                 }
                 
                 # === 发送Pickle数据（支持bytes类型）===
@@ -808,6 +917,95 @@ def debug_publisher_thread(debug_port=5560):
         except:
             pass
         print("✓ 调试数据发布线程已退出")
+
+
+def ui_command_receiver_thread(command_port=5562):
+    """
+    UI命令接收线程 - 接收来自PyQt5 UI的控制命令
+    
+    协议：ZeroMQ PULL socket
+    端口：5562（默认）
+    数据格式：Pickle字典
+    
+    命令类型：
+    {
+        "type": "gripper_command",
+        "action": "open" | "close"
+    }
+    {
+        "type": "gripper_value",
+        "value": 0.0-1.0
+    }
+    """
+    global gripper_value, current_key, last_key_time
+    
+    print(f"\n🎮 启动UI命令接收线程: tcp://*:{command_port}")
+    
+    try:
+        # 创建ZMQ PULL socket接收UI命令
+        cmd_context = zmq.Context()
+        cmd_socket = cmd_context.socket(zmq.PULL)
+        cmd_socket.bind(f"tcp://*:{command_port}")
+        print(f"✓ UI命令PULL socket已绑定到端口 {command_port}")
+        
+        # 设置接收超时（非阻塞模式）
+        cmd_socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms超时
+        
+        command_count = 0
+        
+        while True:
+            try:
+                # 接收命令（超时会抛出Again异常）
+                cmd_data = cmd_socket.recv_pyobj()
+                command_count += 1
+                
+                cmd_type = cmd_data.get("type")
+                
+                if cmd_type == "gripper_command":
+                    # 夹爪开关命令
+                    action = cmd_data.get("action")
+                    if action == "open":
+                        # 模拟按键 '1'
+                        current_key = '1'
+                        last_key_time = time.time()
+                        print(f"🎮 [UI命令] 夹爪打开")
+                    elif action == "close":
+                        # 模拟按键 '2'
+                        current_key = '2'
+                        last_key_time = time.time()
+                        print(f"🎮 [UI命令] 夹爪闭合")
+                    elif action == "stop":
+                        # 停止
+                        current_key = None
+                        print(f"🎮 [UI命令] 夹爪停止")
+                
+                elif cmd_type == "gripper_value":
+                    # 夹爪精确值设置
+                    value = float(cmd_data.get("value", 0.0))
+                    value = np.clip(value, 0.0, 1.0)
+                    with gripper_lock:
+                        gripper_value = value
+                    print(f"🎮 [UI命令] 夹爪设置为: {value:.2f}")
+                
+                else:
+                    print(f"⚠️  未知命令类型: {cmd_type}")
+                
+            except zmq.Again:
+                # 超时，继续等待
+                time.sleep(0.01)
+            except Exception as e:
+                print(f"⚠️  命令接收失败: {e}")
+                time.sleep(0.1)
+    
+    except Exception as e:
+        print(f"❌ UI命令接收线程异常: {e}")
+    finally:
+        try:
+            cmd_socket.close()
+            cmd_context.term()
+        except:
+            pass
+        print("✓ UI命令接收线程已退出")
 
 
 def normalize_angle(angle):
@@ -1498,6 +1696,8 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
                         help="启用调试数据发布功能（给Web UI后端）")
     parser.add_argument("--debug-port", type=int, default=DEFAULT_DEBUG_PORT,
                         help="调试数据发布端口，默认5560")
+    parser.add_argument("--ui-command-port", type=int, default=DEFAULT_UI_COMMAND_PORT,
+                        help="UI命令接收端口，默认5562")
     parser.add_argument("--disable-trajectory-plot", action="store_true",
                         help="禁用程序退出时的matplotlib 3D轨迹图生成（避免Qt冲突）")
     
@@ -1600,7 +1800,17 @@ MuJoCo接收端（lerobot_zeroMQ_imu.py）：
         gripper_thread = threading.Thread(target=gripper_update_thread, daemon=True, name="GripperUpdater")
         gripper_thread.start()
         
-        print("✓ 键盘控制已启动（双线程模式：按键检测 + 夹爪更新）\n")
+        # UI命令接收线程
+        ui_command_thread = threading.Thread(
+            target=ui_command_receiver_thread,
+            args=(args.ui_command_port,),
+            daemon=True,
+            name="UICommandReceiver"
+        )
+        ui_command_thread.start()
+        
+        print("✓ 键盘控制已启动（双线程模式：按键检测 + 夹爪更新）")
+        print(f"✓ UI命令接收已启动: tcp://*:{args.ui_command_port}\n")
         
         # 启动视频接收线程（如果启用）
         global video_thread_running
